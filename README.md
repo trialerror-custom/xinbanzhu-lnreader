@@ -2,13 +2,18 @@
 
 A small custom repository for **LNReader 2.1.4**. The source retrieves public
 18mh.net novel chapters and optionally translates Chinese to English before
-passing them to the reader. Version **1.1.0** also translates novel titles and
-chapter names and supports the site's browse filters. No app modification or
+passing them to the reader. Version **1.2.0** translates novel titles,
+chapter names and descriptions, decodes cover thumbnails, and supports the site's browse filters. No app modification or
 translation backend is needed.
 
 ## Plugin settings
 
 In LNReader, open the installed plugin's settings:
+
+**New in 1.2.0:** **Translate novel descriptions** and **Load and decode cover
+thumbnails** both default to on. Descriptions use the selected translator and
+translation cache; provider Off leaves them in Chinese. Covers work independently
+of translation and do not use a translation API or third-party proxy.
 
 | Setting                         | Value                                                       |
 | ------------------------------- | ----------------------------------------------------------- |
@@ -53,20 +58,22 @@ Microsoft credentials.
 5. In LNReader, add that URL as a plugin repository. Install **18mh — English**.
    Set provider options in the plugin settings, then open the source in Browse.
 
-The working repository is now in `D:\Professional\LN-reader-custom\xinbanzhu-lnreader`,
+The working repository is in `D:\Professional\LN-reader-custom\xinbanzhu-lnreader`,
 with remote `https://github.com/trialerror-custom/xinbanzhu-lnreader.git`. The
-existing published repository URL stays the same. The changes to 1.1.0 are local
-until committed and pushed; the existing workflow deploys pushes to `main`.
+existing published repository URL stays the same. The existing workflow builds,
+tests, and deploys releases pushed to `main`.
 
-## Upgrade from 1.0.0
+## Upgrade to 1.2.0
 
 Publish the updated source through the existing workflow, refresh the repository
-in LNReader, and update **18mh — English** to **1.1.0**. Its ID and setting keys
+in LNReader, and update **18mh — English** to **1.2.0**. Its ID and setting keys
 are unchanged, preserving the existing source association and saved settings.
-The two title-translation switches default to on for existing installations.
+The title, description, and cover switches default to on for existing installations.
 
 Refresh a novel's details/chapter list to fetch translated names for existing
-entries. Novel paths, chapter paths, and chapter numbers stay unchanged. Reading
+entries, translate its description, and replace an old encrypted cover URL with
+a decoded cover. Reload Browse/search to fetch thumbnails there. Novel paths,
+chapter paths, and chapter numbers stay unchanged. Reading
 progress and downloaded chapter bodies are not modified by this plugin update.
 Chapter bodies previously downloaded in another language retain that language.
 
@@ -92,17 +99,17 @@ search. Browse and Latest use the same chosen collection.
 
 ## Reading and search
 
-- Novel titles translate in Browse and search results, and chapter names translate
-  when loading novel details, without opening the individual chapters. Synopsis,
-  author names, and genre metadata remain in the original language.
+- Novel titles translate in Browse and search results. Chapter names and the
+  description translate when loading novel details, without opening individual
+  chapters. Author names and genre metadata remain in the original language.
 - Search terms still go to the Chinese source as entered; English search terms
   are not automatically translated. Use a Chinese keyword, a source URL, or ID.
 - Title translation uses the selected Google/Microsoft provider and its quota.
   New chapter lists can take longer to load, especially for very long novels.
   Only missing Chinese names are translated. A separate cache retains up to 5,000
-  successful title translations, shared between Browse and novel details and
+  successful title/description translations, shared between Browse and novel details and
   separated by provider. The cache switch applies to both titles and bodies.
-- If title translation fails, original names remain visible and are retried on
+- If title or description translation fails, originals remain visible and are retried on
   refresh. A translation failure in the chapter body still produces an error.
   Turning the provider Off disables both name and body translation; title switches
   can also be disabled independently.
@@ -121,11 +128,20 @@ search. Browse and Latest use the same chosen collection.
 
 ## Access limits
 
+The source serves encrypted image bytes for many cover URLs. The plugin uses the
+same public AES-CBC decoding as the website and returns image data URIs supported
+by LNReader's image component. It fetches up to three covers concurrently and
+stores up to 40 covers, with an aggregate cache limit of 8 million data-URI
+characters and a seven-day cache lifetime. This adds work on the first Browse
+load; cached covers avoid repeated downloads, including when signed URLs change.
+Disable **Load and decode cover thumbnails** if you prefer less image traffic.
+An unavailable or unrecognized image uses the app's placeholder.
+
 Only public chapters are supported. Locked chapters throw a clear error and are
 not sent for translation. This plugin does not log in, spend site credits, or
 unlock chapters. Unlocking on the website does not automatically establish an
 authenticated session in this plugin. Cover URLs can expire; refreshing the novel
-gets a new source URL. Source markup and network restrictions can change.
+gets a new source URL. Source markup, image decoding keys, and network restrictions can change.
 
 ## Local development
 
@@ -141,7 +157,8 @@ npm run check:plugin
 
 The live check tests listings, filters, pagination, details, public chapter
 extraction, locked chapter handling, search, a neutral Google translation, and
-the title-translation/cache pipeline using neutral sample names.
+the metadata-translation/cache pipeline using neutral sample names and a
+description, plus actual source-cover decoding without displaying the image.
 It makes no Microsoft requests and needs no secrets. Its report is saved under
 `work/live-report.json`. Tests use neutral fixtures and mocked translation APIs.
 
@@ -169,7 +186,8 @@ hosting instead. The default `127.0.0.1` build is a PC preview, not a phone URL.
 ## Compatibility and validation
 
 Targets LNReader 2.1.4's CommonJS loader, Cheerio, `@libs/fetch`, `@libs/storage`,
-and `@libs/novelStatus`. The plugin compiles to ES5 with async helpers, matching
+and `@libs/novelStatus`. AES decoding is bundled into the plugin, so no extra app
+module or service is required. The build uses esbuild then compiles to ES5 with async helpers, matching
 the upstream plugin compilation target. The harness deliberately exposes only
 the imported modules available in 2.1.4. Android installation and rendering still
 need a device check; Node validation cannot prove Android behavior.

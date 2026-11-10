@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
+import { build } from 'esbuild';
 
 const baseArg = process.argv.find(value => value.startsWith('--base-url='));
 const configured =
@@ -15,7 +16,22 @@ if (
   throw new Error('Use an HTTP(S) public base URL without credentials.');
 const output = path.resolve('dist');
 fs.mkdirSync(path.join(output, 'plugins'), { recursive: true });
-const source = fs.readFileSync('plugins/english/eighteenMhEnglish.ts', 'utf8');
+const bundle = await build({
+  entryPoints: ['plugins/english/eighteenMhEnglish.ts'],
+  bundle: true,
+  write: false,
+  platform: 'neutral',
+  format: 'esm',
+  target: 'es2017',
+  external: ['cheerio', '@libs/*'],
+  legalComments: 'inline',
+});
+const notices = fs.readFileSync('THIRD_PARTY_NOTICES.txt', 'utf8');
+const source =
+  '/*! Bundled aes-js 3.1.2\n' +
+  notices +
+  '\n*/\n' +
+  bundle.outputFiles[0].text;
 const result = ts.transpileModule(source, {
   compilerOptions: {
     target: ts.ScriptTarget.ES5,
@@ -59,6 +75,7 @@ const manifest = [
   },
 ];
 fs.copyFileSync('assets/icon.png', path.join(output, 'icon.png'));
+fs.writeFileSync(path.join(output, 'THIRD_PARTY_NOTICES.txt'), notices);
 fs.writeFileSync(
   path.join(output, 'plugins.json'),
   JSON.stringify(manifest, null, 2) + '\n',

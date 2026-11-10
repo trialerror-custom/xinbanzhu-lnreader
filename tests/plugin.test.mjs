@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createCipheriv } from 'node:crypto';
 import { createPlugin } from '../scripts/runtime.mjs';
 
 const chapterPath = '/novel_chapter/123/1.html';
@@ -10,7 +11,7 @@ const source = text => new Response(text, { status: 200 });
 test('bundle initializes with only LNReader 2.1.4 supported modules and dropdown', () => {
   const { plugin } = createPlugin();
   assert.equal(plugin.id, 'eighteenMhEnglish');
-  assert.equal(plugin.version, '1.1.0');
+  assert.equal(plugin.version, '1.2.0');
   assert.deepEqual(
     plugin.pluginSettings.translationProvider.options.map(item => item.value),
     ['google', 'microsoft', 'off'],
@@ -220,8 +221,7 @@ test('novel chapter extraction deduplicates and sorts numeric chapter numbers', 
   );
 });
 
-const listing =
-  '<a href="/novel/detail/123"><img alt="春天的故事" data-src="https://images.example/cover.jpg"></a>';
+const listing = '<a href="/novel/detail/123"><img alt="春天的故事"></a>';
 const novelDetail =
   '<h1 class="jm-dt-title">春天的故事</h1><a class="jm-dt-ch" href="/novel_chapter/123/1.html" data-chapter-no="1">第一章：新的开始</a><a class="jm-dt-ch" href="/novel_chapter/123/2.html" data-chapter-no="2">第二章：回家</a>';
 const translatedTitles = {
@@ -472,4 +472,194 @@ test('Google pacing is shared between title and chapter-body requests', async ()
     starts[1] - starts[0] >= 1200,
     'Title and body requests must share the 1.25-second pacing interval',
   );
+});
+
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1sAAAAASUVORK5CYII=',
+  'base64',
+);
+function encryptedImage() {
+  const padded = Buffer.alloc(Math.ceil(png.length / 16) * 16);
+  png.copy(padded);
+  const cipher = createCipheriv(
+    'aes-128-cbc',
+    Buffer.from('f5d965df75336270'),
+    Buffer.from('97b60394abc2fbe1'),
+  );
+  cipher.setAutoPadding(false);
+  return Buffer.concat([cipher.update(padded), cipher.final()]);
+}
+
+test('descriptions translate independently and reuse the metadata cache', async () => {
+  let translations = 0;
+  const values = new Map([
+    ['translateNovelTitles', false],
+    ['translateChapterTitles', false],
+  ]);
+  const { plugin } = createPlugin({
+    values,
+    fetcher: async url => {
+      if (url.includes('translate.googleapis.com')) {
+        translations++;
+        assert.equal(
+          new URL(url).searchParams.get('q'),
+          '这是一个关于春天的故事。',
+        );
+        return Response.json([[['This is a story about spring.']]]);
+      }
+      return source(
+        novelDetail + '<p class="jm-dt-desc__p">这是一个关于春天的故事。</p>',
+      );
+    },
+  });
+  assert.equal(
+    (await plugin.parseNovel('/novel/detail/123')).summary,
+    'This is a story about spring.',
+  );
+  await plugin.parseNovel('/novel/detail/123');
+  assert.equal(translations, 1);
+  values.set('translateDescriptions', false);
+  assert.equal(
+    (await plugin.parseNovel('/novel/detail/123')).summary,
+    '这是一个关于春天的故事。',
+  );
+  values.set('translateDescriptions', true);
+  values.set('translationProvider', 'off');
+  assert.equal(
+    (await plugin.parseNovel('/novel/detail/123')).summary,
+    '这是一个关于春天的故事。',
+  );
+  assert.equal(translations, 1);
+});
+
+test('unavailable description translation keeps the original description', async () => {
+  const { plugin } = createPlugin({
+    values: new Map([
+      ['translateNovelTitles', false],
+      ['translateChapterTitles', false],
+    ]),
+    fetcher: async url =>
+      url.includes('translate.googleapis.com')
+        ? new Response('', { status: 429 })
+        : source(novelDetail + '<p class="jm-dt-desc__p">春天的故事。</p>'),
+  });
+  assert.equal(
+    (await plugin.parseNovel('/novel/detail/123')).summary,
+    '春天的故事。',
+  );
+});
+
+test('encrypted covers decode without a proxy and cache across expiring signatures', async () => {
+  let calls = 0;
+  const { plugin, values } = createPlugin({
+    fetcher: async (url, init) => {
+      calls++;
+      assert.equal(init.headers.Referer, 'https://18mh.net/');
+      assert(!JSON.stringify(init).includes('Ocp-Apim'));
+      return new Response(encryptedImage(), {
+        headers: { 'Content-Type': 'binary/octet-stream' },
+      });
+    },
+  });
+  const uri = await plugin.cover(
+    'https://images.example/cover.jpeg?auth_key=old',
+  );
+  assert(uri.startsWith('data:image/png;base64,'));
+  assert.deepEqual(
+    Buffer.from(uri.split(',')[1], 'base64').subarray(0, png.length),
+    png,
+  );
+  assert.equal(
+    await plugin.cover('https://images.example/cover.jpeg?auth_key=new'),
+    uri,
+  );
+  assert.equal(calls, 1);
+  assert(values.has('coverCacheV1:https://images.example/cover.jpeg'));
+});
+
+test('plain cover bytes pass through and concurrent loads share one request', async () => {
+  let calls = 0;
+  const { plugin } = createPlugin({
+    fetcher: async () => {
+      calls++;
+      return new Response(png);
+    },
+  });
+  const [first, second] = await Promise.all([
+    plugin.cover('https://images.example/plain.png'),
+    plugin.cover('https://images.example/plain.png'),
+  ]);
+  assert.equal(first, 'data:image/png;base64,' + png.toString('base64'));
+  assert.equal(first, second);
+  assert.equal(calls, 1);
+});
+
+test('failed covers and disabled thumbnails do not break novel details', async () => {
+  let imageCalls = 0;
+  const values = new Map([['translationProvider', 'off']]);
+  const { plugin } = createPlugin({
+    values,
+    fetcher: async url => {
+      if (url.startsWith('https://images.example')) {
+        imageCalls++;
+        return source('<html>Not an image</html>');
+      }
+      return source(
+        novelDetail +
+          '<img class="jm-dt-cover__img" data-src="https://images.example/bad.jpeg">',
+      );
+    },
+  });
+  const novel = await plugin.parseNovel('/novel/detail/123');
+  assert.equal(novel.cover, undefined);
+  assert.equal(novel.chapters.length, 2);
+  assert.equal(imageCalls, 1);
+  values.set('loadThumbnails', false);
+  await plugin.parseNovel('/novel/detail/123');
+  assert.equal(imageCalls, 1);
+});
+
+test('decoded covers appear in Browse and novel details with shared caching', async () => {
+  let imageCalls = 0;
+  const { plugin } = createPlugin({
+    values: new Map([['translationProvider', 'off']]),
+    fetcher: async url => {
+      if (url.startsWith('https://images.example')) {
+        imageCalls++;
+        return new Response(encryptedImage());
+      }
+      if (url.includes('_feed=1'))
+        return feed(
+          '<article class="jm-card"><a href="/novel/detail/123">春天的故事</a><img data-src="https://images.example/cover.jpeg"></article>',
+        );
+      return source(
+        novelDetail +
+          '<img class="jm-dt-cover__img" data-src="https://images.example/cover.jpeg">',
+      );
+    },
+  });
+  const novels = await plugin.popularNovels(1);
+  const novel = await plugin.parseNovel('/novel/detail/123');
+  assert(novels[0].cover.startsWith('data:image/png;'));
+  assert.equal(novels[0].cover, novel.cover);
+  assert.equal(imageCalls, 1);
+});
+
+test('cover cache has an entry bound and expires after seven days', async () => {
+  let calls = 0;
+  const { plugin, values } = createPlugin({
+    fetcher: async () => {
+      calls++;
+      return new Response(png);
+    },
+  });
+  for (let index = 0; index < 41; index++)
+    await plugin.cover('https://images.example/' + index + '.png');
+  assert.equal(values.get('coverCacheIndexV1').length, 40);
+  assert(!values.has('coverCacheV1:https://images.example/0.png'));
+  const key = 'coverCacheV1:https://images.example/40.png';
+  const entry = values.get(key);
+  values.set(key, { ...entry, updatedAt: Date.now() - 8 * 86400000 });
+  await plugin.cover('https://images.example/40.png');
+  assert.equal(calls, 42);
 });

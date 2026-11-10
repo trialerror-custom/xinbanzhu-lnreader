@@ -3,6 +3,7 @@ import { fetchApi } from '@libs/fetch';
 import { storage } from '@libs/storage';
 import { NovelStatus } from '@libs/novelStatus';
 import { FilterTypes } from '@libs/filterInputs';
+import { ModeOfOperation, utils } from 'aes-js';
 
 type NovelItem = { name: string; path: string; cover?: string };
 type ChapterItem = { name: string; path: string; chapterNumber: number };
@@ -27,7 +28,7 @@ type Setting = {
 class EighteenMhEnglishPlugin {
   id = 'eighteenMhEnglish';
   name = '18mh — English';
-  version = '1.1.0';
+  version = '1.2.0';
   site = 'https://18mh.net';
   icon = 'icon.png';
   imageRequestInit = { headers: { Referer: 'https://18mh.net/' } };
@@ -148,10 +149,24 @@ class EighteenMhEnglishPlugin {
       type: 'Switch',
       value: true,
     },
+    translateDescriptions: {
+      label: 'Translate novel descriptions',
+      type: 'Switch',
+      value: true,
+    },
+    loadThumbnails: {
+      label: 'Load and decode cover thumbnails',
+      type: 'Switch',
+      value: true,
+    },
   };
   private queue: Promise<unknown> = Promise.resolve();
   private inFlight: Record<string, Promise<string> | undefined> = {};
   private googleReadyAt = 0;
+  private coverRequests: Record<
+    string,
+    Promise<string | undefined> | undefined
+  > = {};
 
   private setting(key: string): string | boolean {
     const value = storage.get(key);
@@ -200,7 +215,9 @@ class EighteenMhEnglishPlugin {
       const card = link.closest(
         'li, .jm-card, .jm-novel-card, .jm-book, .jm-hp-card',
       );
-      const image = link.find('img').first();
+      const image = (
+        link.find('img').length ? link.find('img') : card.find('img')
+      ).first();
       const name = (
         link.find('h3, h2, .title').first().text() ||
         link.attr('title') ||
@@ -236,11 +253,162 @@ class EighteenMhEnglishPlugin {
   }
 
   private async translatedListings(novels: NovelItem[]): Promise<NovelItem[]> {
-    const names = await this.metadata(
-      novels.map(novel => novel.name),
-      'translateNovelTitles',
-    );
-    return novels.map((novel, index) => ({ ...novel, name: names[index] }));
+    const [names, covers] = await Promise.all([
+      this.metadata(
+        novels.map(novel => novel.name),
+        'translateNovelTitles',
+      ),
+      this.covers(novels),
+    ]);
+    return novels.map((novel, index) => ({
+      ...novel,
+      name: names[index],
+      cover: covers[index],
+    }));
+  }
+
+  private async covers(novels: NovelItem[]): Promise<(string | undefined)[]> {
+    const covers: (string | undefined)[] = [];
+    for (let index = 0; index < novels.length; index += 3) {
+      covers.push(
+        ...(await Promise.all(
+          novels.slice(index, index + 3).map(novel => this.cover(novel.cover)),
+        )),
+      );
+    }
+    return covers;
+  }
+
+  private async cover(url?: string): Promise<string | undefined> {
+    if (
+      !url ||
+      this.setting('loadThumbnails') !== true ||
+      url.includes('loading.svg')
+    )
+      return undefined;
+    const absolute = url.startsWith('//')
+      ? 'https:' + url
+      : url.startsWith('/')
+        ? this.site + url
+        : url;
+    if (!/^https:\/\//i.test(absolute)) return undefined;
+    // Signed query strings expire; the file path identifies the actual cover.
+    const key = 'coverCacheV1:' + absolute.split('?')[0];
+    const cached = storage.get(key) as
+      | { uri?: string; updatedAt?: number }
+      | undefined;
+    if (
+      cached?.uri?.startsWith('data:image/') &&
+      Date.now() - (cached.updatedAt || 0) < 7 * 86400000
+    )
+      return cached.uri;
+    if (this.coverRequests[key]) return this.coverRequests[key];
+    const request = this.fetchCover(absolute, key);
+    this.coverRequests[key] = request;
+    try {
+      return await request;
+    } finally {
+      delete this.coverRequests[key];
+    }
+  }
+
+  private async fetchCover(
+    url: string,
+    key: string,
+  ): Promise<string | undefined> {
+    try {
+      const response = await fetchApi(url, {
+        headers: { Referer: this.site + '/' },
+      });
+      if (!response.ok) return undefined;
+      let bytes: Uint8Array = new Uint8Array(await response.arrayBuffer());
+      if (!bytes.length || bytes.length > 3 * 1024 * 1024) return undefined;
+      if (!this.imageMime(bytes)) {
+        if (bytes.length % 16) return undefined;
+        // Same public image decoding used by the site's lazyload.js (AES-CBC, no padding).
+        bytes = new ModeOfOperation.cbc(
+          utils.utf8.toBytes('f5d965df75336270'),
+          utils.utf8.toBytes('97b60394abc2fbe1'),
+        ).decrypt(bytes);
+      }
+      const mime = this.imageMime(bytes);
+      if (!mime) return undefined;
+      const uri = 'data:' + mime + ';base64,' + this.base64(bytes);
+      storage.set(key, { uri, updatedAt: Date.now() });
+      const stored = storage.get('coverCacheIndexV1');
+      const entries: { key: string; size: number }[] = Array.isArray(stored)
+        ? stored.filter(
+            item =>
+              item &&
+              typeof item.key === 'string' &&
+              typeof item.size === 'number' &&
+              item.key !== key,
+          )
+        : [];
+      entries.push({ key, size: uri.length });
+      let total = entries.reduce((sum, item) => sum + item.size, 0);
+      while (entries.length > 40 || total > 8000000) {
+        const oldest = entries.shift()!;
+        storage.delete(oldest.key);
+        total -= oldest.size;
+      }
+      storage.set('coverCacheIndexV1', entries);
+      return uri;
+    } catch {
+      // A failed image must not prevent reading or translating the novel.
+      return undefined;
+    }
+  }
+
+  private imageMime(bytes: Uint8Array): string | undefined {
+    if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255)
+      return 'image/jpeg';
+    if (
+      bytes[0] === 137 &&
+      bytes[1] === 80 &&
+      bytes[2] === 78 &&
+      bytes[3] === 71
+    )
+      return 'image/png';
+    if (
+      bytes[0] === 71 &&
+      bytes[1] === 73 &&
+      bytes[2] === 70 &&
+      bytes[3] === 56
+    )
+      return 'image/gif';
+    if (
+      bytes[0] === 82 &&
+      bytes[1] === 73 &&
+      bytes[2] === 70 &&
+      bytes[3] === 70 &&
+      bytes[8] === 87 &&
+      bytes[9] === 69 &&
+      bytes[10] === 66 &&
+      bytes[11] === 80
+    )
+      return 'image/webp';
+    return undefined;
+  }
+
+  private base64(bytes: Uint8Array): string {
+    const alphabet =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const output: string[] = [];
+    for (let index = 0; index < bytes.length; index += 3) {
+      const a = bytes[index],
+        b = bytes[index + 1],
+        c = bytes[index + 2];
+      output.push(
+        alphabet[a >> 2] +
+          alphabet[((a & 3) << 4) | ((b || 0) >> 4)] +
+          (index + 1 < bytes.length
+            ? alphabet[((b & 15) << 2) | ((c || 0) >> 6)]
+            : '=') +
+          (index + 2 < bytes.length ? alphabet[c & 63] : '='),
+      );
+    }
+    return output.join('');
   }
 
   async popularNovels(
@@ -360,14 +528,19 @@ class EighteenMhEnglishPlugin {
       chapters.map(chapter => chapter.name),
       'translateChapterTitles',
     );
+    const description = $('.jm-dt-desc__p, .detail-page__description')
+      .first()
+      .clone();
+    description.find('br').replaceWith('\n');
+    const summary = (
+      await this.metadata([description.text().trim()], 'translateDescriptions')
+    )[0];
+    const decodedCover = await this.cover(cover);
     return {
       path,
       name: translatedName,
-      cover: cover?.startsWith('/') ? this.site + cover : cover,
-      summary: $('.jm-dt-desc__p, .detail-page__description')
-        .first()
-        .text()
-        .trim(),
+      cover: decodedCover,
+      summary,
       author:
         $('.jm-dt-meta a[href*="/author/"]').first().text().trim() || undefined,
       genres: $('.jm-dt-tags a')

@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createPlugin, timedFetch } from './runtime.mjs';
 
-const values = new Map([['translationProvider', 'off']]);
+const values = new Map([
+  ['translationProvider', 'off'],
+  ['loadThumbnails', false],
+]);
 const { plugin } = createPlugin({ values, fetcher: timedFetch });
 const checks = [];
 async function check(name, action) {
@@ -130,6 +133,25 @@ await check(
     return { translatedNames: output.length, cacheVerified: true };
   },
 );
+await check('Description translation pipeline', async () => {
+  const input = '这是一个关于春天和友谊的故事。';
+  const output = await plugin.metadata([input], 'translateDescriptions');
+  assert(output[0] !== input && /[a-z]/i.test(output[0]));
+  return { translated: true };
+});
+await check('Live encrypted cover decoding', async () => {
+  values.set('translationProvider', 'off');
+  values.set('loadThumbnails', true);
+  const novel = await plugin.parseNovel('/novel/detail/27340');
+  assert(novel.cover?.startsWith('data:image/'));
+  const bytes = Buffer.from(novel.cover.split(',')[1], 'base64');
+  assert.equal(bytes[0], 255);
+  assert.equal(bytes[1], 216);
+  return {
+    mime: novel.cover.split(';')[0].slice(5),
+    decodedBytes: bytes.length,
+  };
+});
 const report = {
   checkedAt: new Date().toISOString(),
   runtime: 'Node mock of LNReader 2.1.4 module loader; Android not tested',
