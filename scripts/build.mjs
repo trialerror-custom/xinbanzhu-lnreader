@@ -39,7 +39,13 @@ const plugin = Function(
   'require',
   'module',
   'const exports = module.exports = {};\n' + code + '\nreturn exports.default;',
-)(() => ({}), {});
+)(
+  name =>
+    name === '@libs/filterInputs'
+      ? { FilterTypes: { TextInput: 'Text', Picker: 'Picker' } }
+      : {},
+  {},
+);
 const manifest = [
   {
     id: plugin.id,

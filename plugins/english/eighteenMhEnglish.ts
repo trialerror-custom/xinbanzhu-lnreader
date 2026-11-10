@@ -2,10 +2,21 @@ import { load } from 'cheerio';
 import { fetchApi } from '@libs/fetch';
 import { storage } from '@libs/storage';
 import { NovelStatus } from '@libs/novelStatus';
+import { FilterTypes } from '@libs/filterInputs';
 
 type NovelItem = { name: string; path: string; cover?: string };
 type ChapterItem = { name: string; path: string; chapterNumber: number };
 type Provider = 'google' | 'microsoft' | 'off';
+type SourceFilter = {
+  label: string;
+  type: FilterTypes;
+  value: string;
+  options?: { label: string; value: string }[];
+};
+type BrowseOptions = {
+  showLatestNovels?: boolean;
+  filters?: Record<string, { value: string }>;
+};
 type Setting = {
   label: string;
   value: string | boolean;
@@ -16,10 +27,83 @@ type Setting = {
 class EighteenMhEnglishPlugin {
   id = 'eighteenMhEnglish';
   name = '18mh — English';
-  version = '1.0.0';
+  version = '1.1.0';
   site = 'https://18mh.net';
   icon = 'icon.png';
   imageRequestInit = { headers: { Referer: 'https://18mh.net/' } };
+  filters: Record<string, SourceFilter> = {
+    collection: {
+      label: 'Category / collection',
+      type: FilterTypes.Picker,
+      value: '/novel/all',
+      options: [
+        { label: 'All — latest updates', value: '/novel/all' },
+        { label: 'Most viewed', value: '/novel/hot' },
+        { label: 'Newly listed', value: '/novel/last_published' },
+        { label: 'Original works', value: '/novel/original' },
+        { label: 'Urban passion · 都市激情', value: '/novel/all/dsjq' },
+        { label: 'Campus romance · 校园春色', value: '/novel/all/xycs' },
+        { label: 'Rural romance · 乡村爱情', value: '/novel/all/xcaq' },
+        { label: 'Systems / superpowers · 系统异能', value: '/novel/all/xtyn' },
+        { label: 'Family / incest · 家庭乱伦', value: '/novel/all/jtll' },
+        {
+          label: 'Transmigration / rebirth · 穿越重生',
+          value: '/novel/all/cycs',
+        },
+        { label: 'Classic wuxia · 经典武侠', value: '/novel/all/jdwx' },
+        { label: 'Fan adaptations · 同人改编', value: '/novel/all/trgb' },
+        { label: 'Science fiction · 科学幻想', value: '/novel/all/kxhx' },
+        { label: 'Eastern fantasy · 东方玄幻', value: '/novel/all/dfxh' },
+        {
+          label: 'Entertainment / celebrities · 娱乐明星',
+          value: '/novel/all/ylmx',
+        },
+        { label: 'Alternate history · 历史架空', value: '/novel/all/lsjk' },
+        { label: 'Western fantasy · 西方魔幻', value: '/novel/all/xfmh' },
+        { label: 'Sage novels · 贤者小说', value: '/novel/all/xzxs' },
+      ],
+    },
+    tag: {
+      label: 'Tag (use All category)',
+      type: FilterTypes.Picker,
+      value: '',
+      options: [
+        { label: 'Any', value: '' },
+        { label: 'Uniforms · 制服', value: '制服' },
+        { label: 'One-to-one · 1v1', value: '1v1' },
+        { label: 'Plot-driven · 剧情', value: '剧情' },
+        { label: 'Discipline · 调教', value: '调教' },
+        { label: 'Contrast · 反差', value: '反差' },
+      ],
+    },
+    customTag: {
+      label: 'Other tag (exact Chinese tag; overrides Tag)',
+      type: FilterTypes.TextInput,
+      value: '',
+    },
+    status: {
+      label: 'Status',
+      type: FilterTypes.Picker,
+      value: '',
+      options: [
+        { label: 'Any', value: '' },
+        { label: 'Ongoing', value: '2' },
+        { label: 'Completed', value: '1' },
+      ],
+    },
+    length: {
+      label: 'Length (Chinese characters)',
+      type: FilterTypes.Picker,
+      value: '',
+      options: [
+        { label: 'Any', value: '' },
+        { label: 'Under 100,000', value: '1' },
+        { label: '100,000–500,000', value: '2' },
+        { label: '500,000–1,000,000', value: '3' },
+        { label: 'Over 1,000,000', value: '4' },
+      ],
+    },
+  };
   pluginSettings: Record<string, Setting> = {
     translationProvider: {
       label: 'Translation provider',
@@ -54,9 +138,20 @@ class EighteenMhEnglishPlugin {
       type: 'Switch',
       value: true,
     },
+    translateNovelTitles: {
+      label: 'Translate novel titles in Browse and search',
+      type: 'Switch',
+      value: true,
+    },
+    translateChapterTitles: {
+      label: 'Translate chapter names when opening novel details',
+      type: 'Switch',
+      value: true,
+    },
   };
   private queue: Promise<unknown> = Promise.resolve();
   private inFlight: Record<string, Promise<string> | undefined> = {};
+  private googleReadyAt = 0;
 
   private setting(key: string): string | boolean {
     const value = storage.get(key);
@@ -130,19 +225,75 @@ class EighteenMhEnglishPlugin {
     return novels;
   }
 
+  private filterValue(key: string, options?: BrowseOptions): string {
+    const value = options?.filters?.[key]?.value ?? this.filters[key].value;
+    if (typeof value !== 'string')
+      throw new Error('Invalid ' + key + ' filter.');
+    const choices = this.filters[key].options;
+    if (choices && !choices.some(choice => choice.value === value))
+      throw new Error('Choose a valid ' + key + ' filter.');
+    return value;
+  }
+
+  private async translatedListings(novels: NovelItem[]): Promise<NovelItem[]> {
+    const names = await this.metadata(
+      novels.map(novel => novel.name),
+      'translateNovelTitles',
+    );
+    return novels.map((novel, index) => ({ ...novel, name: names[index] }));
+  }
+
   async popularNovels(
     pageNo: number,
-    options?: { showLatestNovels?: boolean },
+    options?: BrowseOptions,
   ): Promise<NovelItem[]> {
-    const $ = await this.page(
-      '/novel/all' + (pageNo > 1 ? '/page/' + pageNo : ''),
-    );
-    const novels = this.listings($);
-    if (!novels.length && pageNo === 1)
+    if (!Number.isInteger(pageNo) || pageNo < 1)
+      throw new Error('Invalid page number.');
+    const collection = this.filterValue('collection', options);
+    const tag = (
+      this.filterValue('customTag', options).trim() ||
+      this.filterValue('tag', options)
+    ).trim();
+    if (tag && (tag.length > 80 || /[\/?#]/.test(tag)))
+      throw new Error('Enter a single source tag, not a URL.');
+    if (tag && collection !== '/novel/all')
       throw new Error(
-        '18mh returned no novels. The site layout may have changed.',
+        'For tag browsing, set Category / collection to All — latest updates. The source uses separate collection and tag pages.',
       );
-    return novels;
+    const base = tag ? '/novel/tag/' + encodeURIComponent(tag) : collection;
+    // Match the site's feed pagination, which differs from full-page pagination.
+    const path =
+      base +
+      (pageNo > 1 ? (base === '/novel/all' ? '/page/' : '/') + pageNo : '');
+    const query = ['_feed=1'];
+    for (const key of ['status', 'length']) {
+      const value = this.filterValue(key, options);
+      if (value) query.push(key + '=' + encodeURIComponent(value));
+    }
+    const response = await fetchApi(
+      this.resolveUrl(path + '?' + query.join('&')),
+      {
+        headers: { Referer: this.site + base, Accept: 'application/json' },
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        '18mh returned HTTP ' + response.status + ' while loading filters.',
+      );
+    const body = (await response.json()) as {
+      code?: number;
+      data?: { wall_html?: string; total_page?: number };
+    };
+    if (body?.code !== 200 || typeof body.data?.wall_html !== 'string')
+      throw new Error(
+        '18mh returned an invalid list feed. The source may have changed.',
+      );
+    if (
+      typeof body.data.total_page === 'number' &&
+      pageNo > body.data.total_page
+    )
+      return [];
+    return this.translatedListings(this.listings(load(body.data.wall_html)));
   }
 
   async searchNovels(searchTerm: string, pageNo: number): Promise<NovelItem[]> {
@@ -157,11 +308,13 @@ class EighteenMhEnglishPlugin {
       const novel = await this.parseNovel('/novel/detail/' + query);
       return [{ name: novel.name, path: novel.path, cover: novel.cover }];
     }
-    return this.listings(
-      await this.page(
-        '/novel/search/' +
-          encodeURIComponent(query.replace(/\s*\/+\s*/g, ' ')) +
-          (pageNo > 1 ? '/page/' + pageNo : ''),
+    return this.translatedListings(
+      this.listings(
+        await this.page(
+          '/novel/search/' +
+            encodeURIComponent(query.replace(/\s*\/+\s*/g, ' ')) +
+            (pageNo > 1 ? '/page/' + pageNo : ''),
+        ),
       ),
     );
   }
@@ -200,9 +353,16 @@ class EighteenMhEnglishPlugin {
     const image = $('.jm-dt-cover__img, .detail-page__cover img').first();
     const cover = image.attr('data-src') || image.attr('src');
     const meta = $('.jm-dt-meta').text();
+    const translatedName = (
+      await this.metadata([name], 'translateNovelTitles')
+    )[0];
+    const chapterNames = await this.metadata(
+      chapters.map(chapter => chapter.name),
+      'translateChapterTitles',
+    );
     return {
       path,
-      name,
+      name: translatedName,
       cover: cover?.startsWith('/') ? this.site + cover : cover,
       summary: $('.jm-dt-desc__p, .detail-page__description')
         .first()
@@ -219,8 +379,61 @@ class EighteenMhEnglishPlugin {
         : /连载|連載/.test(meta)
           ? NovelStatus.Ongoing
           : NovelStatus.Unknown,
-      chapters,
+      chapters: chapters.map((chapter, index) => ({
+        ...chapter,
+        name: chapterNames[index],
+      })),
     };
+  }
+
+  private async metadata(texts: string[], toggle: string): Promise<string[]> {
+    const provider = String(this.setting('translationProvider')) as Provider;
+    if (this.setting(toggle) !== true || provider === 'off') return texts;
+    if (provider !== 'google' && provider !== 'microsoft')
+      throw new Error('Choose a valid translation provider.');
+    return this.enqueue(async () => {
+      const resolved: Record<string, string> = Object.create(null);
+      const missing: string[] = [];
+      const prefix = 'metadataCacheV1:' + provider + ':en:';
+      const cacheEnabled = this.setting('cacheTranslations') === true;
+      for (const text of texts) {
+        if (!/[\u3400-\u9fff]/.test(text)) {
+          resolved[text] = text;
+          continue;
+        }
+        const cached = cacheEnabled ? storage.get(prefix + text) : undefined;
+        if (typeof cached === 'string' && cached.length)
+          resolved[text] = cached;
+        else if (missing.indexOf(text) < 0) missing.push(text);
+      }
+      for (let start = 0; start < missing.length; start += 20) {
+        const batch = missing.slice(start, start + 20);
+        try {
+          const translations = await this.translate(batch, provider);
+          const storedKeys = storage.get('metadataCacheIndexV1');
+          const keys: string[] = Array.isArray(storedKeys)
+            ? storedKeys.filter(key => typeof key === 'string')
+            : [];
+          batch.forEach((text, index) => {
+            const translated = translations[index];
+            resolved[text] = translated;
+            if (!cacheEnabled) return;
+            const key = prefix + text;
+            storage.set(key, translated);
+            if (keys.indexOf(key) < 0) keys.push(key);
+          });
+          if (cacheEnabled) {
+            while (keys.length > 5000) storage.delete(keys.shift()!);
+            storage.set('metadataCacheIndexV1', keys);
+          }
+        } catch {
+          // Browsing remains available if translation is temporarily unavailable.
+          // Originals are not cached as successful translations; refresh retries.
+          break;
+        }
+      }
+      return texts.map(text => resolved[text] || text);
+    });
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
@@ -354,36 +567,13 @@ class EighteenMhEnglishPlugin {
           size += parts[start++].length + 2;
         }
         const text = batch.join('\n\n');
-        const url =
-          'https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q=' +
-          encodeURIComponent(text);
-        const response = await fetchApi(url);
-        if (!response.ok)
-          throw new Error(
-            'Unofficial Google Translate returned HTTP ' +
-              response.status +
-              '. Try later or select Microsoft.',
-          );
-        const body: unknown = await response.json();
-        if (!Array.isArray(body) || !Array.isArray(body[0]))
-          throw new Error('Unexpected Google Translate response.');
-        const output = body[0]
-          .map((segment: unknown) =>
-            Array.isArray(segment) && typeof segment[0] === 'string'
-              ? segment[0]
-              : '',
-          )
-          .join('');
-        if (!output.trim())
-          throw new Error('Google Translate returned empty text.');
+        const output = await this.googleSingle(text);
         const split = output.trim().split(/\n\s*\n/);
         if (split.length !== batch.length) {
           // Retry individually if Google changes the paragraph separators.
           for (const item of batch)
             translated.push(await this.googleSingle(item));
         } else translated.push(...split);
-        if (start < parts.length)
-          await new Promise(resolve => setTimeout(resolve, 350));
       }
     } else {
       const apiKey = String(this.setting('microsoftKey')).trim();
@@ -444,14 +634,20 @@ class EighteenMhEnglishPlugin {
   }
 
   private async googleSingle(text: string): Promise<string> {
+    // Share pacing across titles, chapter bodies, and delimiter-recovery requests.
+    const delay = this.googleReadyAt - Date.now();
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    this.googleReadyAt = Date.now() + 1250;
     const response = await fetchApi(
       'https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q=' +
         encodeURIComponent(text),
     );
-    if (!response.ok)
+    if (!response.ok) {
+      if (response.status === 429) this.googleReadyAt = Date.now() + 5000;
       throw new Error(
         'Unofficial Google Translate returned HTTP ' + response.status + '.',
       );
+    }
     const body: unknown = await response.json();
     if (!Array.isArray(body) || !Array.isArray(body[0]))
       throw new Error('Unexpected Google Translate response.');
@@ -464,7 +660,6 @@ class EighteenMhEnglishPlugin {
       .join('');
     if (!output.trim())
       throw new Error('Google Translate returned empty text.');
-    await new Promise(resolve => setTimeout(resolve, 350));
     return output;
   }
 

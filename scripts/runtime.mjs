@@ -8,6 +8,9 @@ export function createPlugin({ values = new Map(), fetcher = fetch } = {}) {
     delete: key => values.delete(key),
   };
   const packages = {
+    '@libs/filterInputs': {
+      FilterTypes: { TextInput: 'Text', Picker: 'Picker' },
+    },
     cheerio: { load },
     '@libs/fetch': { fetchApi: fetcher },
     '@libs/storage': { storage },

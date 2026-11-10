@@ -1,45 +1,62 @@
-# Validation — 10 November 2026
+# Validation — 1.1.0 — 10 November 2026
 
-Implemented in `D:\Professional\LN-reader-custom` for LNReader **2.1.4**.
+Working repository: `D:\Professional\LN-reader-custom\xinbanzhu-lnreader`.
+Remote: `https://github.com/trialerror-custom/xinbanzhu-lnreader.git`.
+Target app: **LNReader 2.1.4**. The original 1.0.0 was confirmed working by the
+user; the new 1.1.0 features have not yet been tested on Android.
+
+## Local changes identified
+
+The original project was moved into the nested `xinbanzhu-lnreader` folder,
+initialized as a separate repository, and pushed as commit `39fbbce` (Initial
+Push). There were no uncommitted changes in that repository before this update.
+The outer directory still has its earlier Git metadata; it was left untouched.
+All implementation changes apply to the nested repository. The existing Pages
+workflow is preserved. No commit, push, or deployment was performed for 1.1.0.
 
 ## Completed checks
 
-- TypeScript strict type check with ES5 target.
-- Prettier formatting check.
-- CommonJS bundle build and initialization through the 2.1.4-style loader.
-- 14 automated behavioral tests: settings; paragraph extraction and cleanup;
-  locked and empty chapters; Google credential separation and cache behavior;
-  translation HTTP failures; concurrent request deduplication; Microsoft request
-  key/region/body; monthly cap; output HTML escaping; long Unicode paragraphs;
-  cache eviction; source URL validation; chapter deduplication and ordering.
-- Live source browsing: 20 novels on each of pages 1 and 2, with different first
-  novel IDs (`30869` and `30849`).
-- Live novel details: 70 ordered chapter links for novel ID `27340`.
-- Live public chapter: 33 extracted paragraphs, 1,874 output HTML characters,
-  with no scripts or iframes.
-- Live locked chapter: chapter 70 returns the plugin's access error.
-- Live search: numeric ID resolves correctly; Chinese keyword returns 20 novels.
-- Live unofficial Google endpoint: two neutral Chinese sentences produced two
-  English paragraphs. No novel text was sent to the service during validation.
+- Strict TypeScript check with ES5 target, formatting check, and CommonJS build
+  against the 2.1.4 module-loader contract, including its filter-input enum.
+- 24 behavioral tests covering existing chapter extraction/translation plus title
+  translation in Browse/search/details, independent switches, metadata caching,
+  provider separation, failure recovery, stable paths, server filter URLs and
+  pagination, unsupported combinations, malformed feeds, and shared Google pacing.
+- 13 live checks: catalogue and pagination; status/length and pagination;
+  category; tag plus status; most-viewed/newly-listed collections; 70 ordered
+  chapter links; public chapter extraction; locked chapter error; ID and keyword
+  search; neutral Google translation; neutral title translation and cache reuse.
+- Live list/filter queries returned 20 novels per tested page. The public sample
+  chapter returned 33 paragraphs and 1,874 HTML characters after cleanup.
+- A live test initially encountered Google HTTP 429 when a title request followed
+  another request immediately. The plugin now shares a 1.25-second request interval
+  across titles, bodies, and paragraph-recovery requests, and delays subsequent
+  attempts after a 429. The final live title/cache check passed.
+- LNReader 2.1.4's chapter upsert updates names using the existing novel ID and
+  chapter path while keeping reading-progress fields separate. This supports
+  refreshing existing chapter names without inventing new chapter identities.
 
-The machine-readable live report is in `work/live-report.json` after running
-`npm run check:plugin`. Counts and source responses may change over time.
+Live checks use translation Off for actual source pages and neutral sample text
+for Google. They do not send novel chapter bodies or private credentials to a
+translation service. The report is saved in `work/live-report.json` after
+`npm run check:plugin`.
 
-## Not verified
+## Remaining limits
 
-- Microsoft live API calls: no user API key was supplied. Request construction,
-  response handling, and local quota limits use mocked tests.
-- Installation, dropdown interaction, and reader rendering on an Android device.
-- GitHub Actions and Pages deployment: workflow supplied; no remote repository or
-  site was created. The default build uses `http://127.0.0.1:8080` for PC preview.
-- Private or unlocked chapters: this version supports public chapters only.
-
-Both Browse and Latest currently use the source catalogue order. Novel titles,
-synopses, and chapter titles remain in Chinese; chapter bodies are translated.
+- Microsoft API construction, response handling, and local cap are mocked; no
+  live Microsoft key was supplied.
+- Android installation, filter controls, and display/refresh of translated names
+  require a device check after publication.
+- Google is unofficial; pacing reduces request bursts but cannot guarantee
+  availability. Metadata failures retain originals and are retried on refresh;
+  chapter-body failures still throw an error.
+- Only public source chapters are supported. Categories, tags, and ranking pages
+  follow the site's separate collection routes rather than unsupported combined
+  filters. Status and length work within the selected route.
+- The local build uses the existing Pages base URL, but 1.1.0 is not published yet.
 
 ## Development environment
 
-The host's PATH did not contain Node.js, npm, or Git. Checks used Codex's bundled
-Node.js/Git and a workspace-local npm CLI. Dependencies were installed normally
-from the registry and recorded in `package-lock.json`. On another PC, install
-Node.js 22+ and use the commands in `README.md`.
+Used Codex's bundled Node.js/Git and a workspace-local npm CLI because the host's
+PATH did not expose them. Dependencies were restored with `npm ci`. The only
+lockfile changes are the project version bump; dependency versions are unchanged.

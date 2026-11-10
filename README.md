@@ -2,7 +2,9 @@
 
 A small custom repository for **LNReader 2.1.4**. The source retrieves public
 18mh.net novel chapters and optionally translates Chinese to English before
-passing them to the reader. No app modification or translation backend is needed.
+passing them to the reader. Version **1.1.0** also translates novel titles and
+chapter names and supports the site's browse filters. No app modification or
+translation backend is needed.
 
 ## Plugin settings
 
@@ -15,6 +17,8 @@ In LNReader, open the installed plugin's settings:
 | Microsoft resource region       | The region shown in the Azure resource                      |
 | Microsoft monthly character cap | Defaults to 1,900,000 on this device                        |
 | Cache translated chapters       | Enabled by default; retains the latest 100 chapter results  |
+| Translate novel titles          | Enabled by default for Browse, search, and novel details    |
+| Translate chapter names         | Enabled by default when loading a novel's chapter list      |
 
 Google is selected by default and needs no account or API key. This uses an
 unofficial endpoint that can throttle, block, or change. Microsoft requires an
@@ -49,12 +53,59 @@ Microsoft credentials.
 5. In LNReader, add that URL as a plugin repository. Install **18mh — English**.
    Set provider options in the plugin settings, then open the source in Browse.
 
-This folder is prepared for publication but has not been uploaded to GitHub.
+The working repository is now in `D:\Professional\LN-reader-custom\xinbanzhu-lnreader`,
+with remote `https://github.com/trialerror-custom/xinbanzhu-lnreader.git`. The
+existing published repository URL stays the same. The changes to 1.1.0 are local
+until committed and pushed; the existing workflow deploys pushes to `main`.
+
+## Upgrade from 1.0.0
+
+Publish the updated source through the existing workflow, refresh the repository
+in LNReader, and update **18mh — English** to **1.1.0**. Its ID and setting keys
+are unchanged, preserving the existing source association and saved settings.
+The two title-translation switches default to on for existing installations.
+
+Refresh a novel's details/chapter list to fetch translated names for existing
+entries. Novel paths, chapter paths, and chapter numbers stay unchanged. Reading
+progress and downloaded chapter bodies are not modified by this plugin update.
+Chapter bodies previously downloaded in another language retain that language.
+
+## Browse filters
+
+Open the source in Browse and use LNReader's filter button:
+
+- **Category / collection:** all novels by latest update, most viewed, newly
+  listed, original works, or one of the site's categories. Category labels show
+  English and the original Chinese.
+- **Tag:** the five tags shown on the source's filter bar, or **Other tag** for
+  an exact tag copied from the source. A custom tag overrides the selected tag.
+- **Status:** any, ongoing, or completed.
+- **Length:** the source's four ranges in Chinese characters.
+
+Status and length apply on the server and persist across pagination. The source
+uses separate pages for categories, tags, and ranking collections; they cannot
+all be combined. For tag browsing, select **All — latest updates** in Category /
+collection. An unsupported combination shows an error instead of ignoring your
+selection. Most viewed and newly listed are collection choices because that is
+how the site implements them. Browse filters apply to Browse lists, not keyword
+search. Browse and Latest use the same chosen collection.
 
 ## Reading and search
 
-- Browse lists and search terms use the source's Chinese titles and metadata.
-  Only chapter bodies are translated, keeping requests and quota use low.
+- Novel titles translate in Browse and search results, and chapter names translate
+  when loading novel details, without opening the individual chapters. Synopsis,
+  author names, and genre metadata remain in the original language.
+- Search terms still go to the Chinese source as entered; English search terms
+  are not automatically translated. Use a Chinese keyword, a source URL, or ID.
+- Title translation uses the selected Google/Microsoft provider and its quota.
+  New chapter lists can take longer to load, especially for very long novels.
+  Only missing Chinese names are translated. A separate cache retains up to 5,000
+  successful title translations, shared between Browse and novel details and
+  separated by provider. The cache switch applies to both titles and bodies.
+- If title translation fails, original names remain visible and are retried on
+  refresh. A translation failure in the chapter body still produces an error.
+  Turning the provider Off disables both name and body translation; title switches
+  can also be disabled independently.
 - Search accepts a Chinese title, a numeric novel ID, or an exact source detail
   URL such as `https://18mh.net/novel/detail/27340`.
 - Download translated chapters in LNReader for offline reading. Reopening an
@@ -88,8 +139,9 @@ npm test
 npm run check:plugin
 ```
 
-The live check tests listings, pagination, details, public chapter extraction,
-locked chapter handling, search, and a neutral two-sentence Google translation.
+The live check tests listings, filters, pagination, details, public chapter
+extraction, locked chapter handling, search, a neutral Google translation, and
+the title-translation/cache pipeline using neutral sample names.
 It makes no Microsoft requests and needs no secrets. Its report is saved under
 `work/live-report.json`. Tests use neutral fixtures and mocked translation APIs.
 

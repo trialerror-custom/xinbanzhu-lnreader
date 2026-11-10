@@ -27,6 +27,40 @@ await check('Pagination', async () => {
   assert.notEqual(second[0].path, novels?.[0]?.path);
   return { count: second.length, firstPath: second[0].path };
 });
+await check('Status and length filters with pagination', async () => {
+  const options = {
+    filters: { status: { value: '1' }, length: { value: '1' } },
+  };
+  const first = await plugin.popularNovels(1, options);
+  const second = await plugin.popularNovels(2, options);
+  assert(first.length > 0 && second.length > 0);
+  assert.notEqual(first[0].path, second[0].path);
+  return { firstCount: first.length, secondCount: second.length };
+});
+await check('Category feed', async () => {
+  const found = await plugin.popularNovels(1, {
+    filters: { collection: { value: '/novel/all/kxhx' } },
+  });
+  assert(found.length > 0);
+  return { count: found.length };
+});
+await check('Tag feed with status', async () => {
+  const found = await plugin.popularNovels(1, {
+    filters: { tag: { value: '1v1' }, status: { value: '1' } },
+  });
+  assert(found.length > 0);
+  return { count: found.length };
+});
+await check('Most viewed and newly listed collections', async () => {
+  const hot = await plugin.popularNovels(1, {
+    filters: { collection: { value: '/novel/hot' } },
+  });
+  const newest = await plugin.popularNovels(1, {
+    filters: { collection: { value: '/novel/last_published' } },
+  });
+  assert(hot.length > 0 && newest.length > 0);
+  return { mostViewed: hot.length, newlyListed: newest.length };
+});
 await check('Novel details and chapter order', async () => {
   const novel = await plugin.parseNovel('/novel/detail/27340');
   assert(novel.chapters.length >= 70);
@@ -77,6 +111,25 @@ await check('Unofficial Google endpoint', async () => {
   assert(output.every(text => /[a-z]/i.test(text)));
   return { paragraphs: output.length, sample: output[0] };
 });
+await check(
+  'Title translation pipeline and persistent metadata cache',
+  async () => {
+    const texts = ['春天的故事', '第一章：新的开始', '第二章：回家'];
+    const output = await plugin.metadata(texts, 'translateChapterTitles');
+    assert(
+      output.every(
+        (text, index) => text !== texts[index] && /[a-z]/i.test(text),
+      ),
+    );
+    const cached = values.get('metadataCacheV1:google:en:' + texts[0]);
+    assert.equal(cached, output[0]);
+    assert.deepEqual(
+      await plugin.metadata(texts, 'translateChapterTitles'),
+      output,
+    );
+    return { translatedNames: output.length, cacheVerified: true };
+  },
+);
 const report = {
   checkedAt: new Date().toISOString(),
   runtime: 'Node mock of LNReader 2.1.4 module loader; Android not tested',

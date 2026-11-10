@@ -15,3 +15,9 @@ declare module '@libs/novelStatus' {
     Completed: string;
   };
 }
+declare module '@libs/filterInputs' {
+  export enum FilterTypes {
+    TextInput = 'Text',
+    Picker = 'Picker',
+  }
+}
