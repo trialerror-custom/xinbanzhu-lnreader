@@ -11,7 +11,7 @@ const source = text => new Response(text, { status: 200 });
 test('bundle initializes with only LNReader 2.1.4 supported modules and dropdown', () => {
   const { plugin } = createPlugin();
   assert.equal(plugin.id, 'eighteenMhEnglish');
-  assert.equal(plugin.version, '1.2.0');
+  assert.equal(plugin.version, '1.3.0');
   assert.deepEqual(
     plugin.pluginSettings.translationProvider.options.map(item => item.value),
     ['google', 'microsoft', 'off'],
@@ -77,6 +77,7 @@ test('Google requests have no Microsoft credentials and cache by provider', asyn
 
 test('translation HTTP failure does not save Chinese fallback or successful cache', async () => {
   const { plugin, values } = createPlugin({
+    values: new Map([['retryTemporaryErrors', false]]),
     fetcher: async url =>
       url.startsWith('https://18mh.net/')
         ? source(chapter)
@@ -230,7 +231,7 @@ const translatedTitles = {
   '第二章：回家': 'Chapter 2: Going Home',
 };
 const feed = (html = listing) =>
-  Response.json({ code: 200, data: { wall_html: html, total_page: 3 } });
+  Response.json({ code: 200, data: { wall_html: html, total_page: 1 } });
 
 function titleFetcher(calls) {
   return async url => {
@@ -308,6 +309,7 @@ test('metadata errors retain original names without caching failed translations 
   const calls = [];
   const validFetcher = titleFetcher(calls);
   const { plugin, values } = createPlugin({
+    values: new Map([['retryTemporaryErrors', false]]),
     fetcher: async url =>
       fail && url.includes('translate.googleapis.com')
         ? new Response('', { status: 429 })
@@ -360,7 +362,10 @@ test('metadata cache is provider-specific and respects disabled caching', async 
 test('filters use correct feed pagination and preserve status/length on page 2', async () => {
   const calls = [];
   const { plugin } = createPlugin({
-    values: new Map([['translationProvider', 'off']]),
+    values: new Map([
+      ['translationProvider', 'off'],
+      ['browseBatchSize', '20'],
+    ]),
     fetcher: async (url, init) => {
       calls.push(url);
       assert.equal(init.headers.Accept, 'application/json');
@@ -394,7 +399,10 @@ test('filters use correct feed pagination and preserve status/length on page 2',
 test('tag feed supports common tags, custom tags and filtered pagination', async () => {
   const calls = [];
   const { plugin } = createPlugin({
-    values: new Map([['translationProvider', 'off']]),
+    values: new Map([
+      ['translationProvider', 'off'],
+      ['browseBatchSize', '20'],
+    ]),
     fetcher: async url => {
       calls.push(url);
       return feed();
@@ -535,6 +543,7 @@ test('descriptions translate independently and reuse the metadata cache', async 
 test('unavailable description translation keeps the original description', async () => {
   const { plugin } = createPlugin({
     values: new Map([
+      ['retryTemporaryErrors', false],
       ['translateNovelTitles', false],
       ['translateChapterTitles', false],
     ]),
@@ -662,4 +671,411 @@ test('cover cache has an entry bound and expires after seven days', async () => 
   values.set(key, { ...entry, updatedAt: Date.now() - 8 * 86400000 });
   await plugin.cover('https://images.example/40.png');
   assert.equal(calls, 42);
+});
+
+function catalogueFetcher(count = 45) {
+  const requests = [];
+  const fetcher = async url => {
+    requests.push(url);
+    const page = Number(/\/(\d+)$/.exec(new URL(url).pathname)?.[1] || 1);
+    const start = (page - 1) * 20;
+    const ids = Array.from(
+      { length: Math.max(0, Math.min(20, count - start)) },
+      (_, index) => start + index + 1,
+    );
+    return Response.json({
+      code: 200,
+      data: {
+        total_page: Math.ceil(count / 20),
+        wall_html: ids
+          .map(id => '<a href="/novel/detail/' + id + '">Book ' + id + '</a>')
+          .join(''),
+      },
+    });
+  };
+  return { requests, fetcher };
+}
+
+for (const batchSize of [5, 10, 20]) {
+  test(
+    'Browse batches of ' +
+      batchSize +
+      ' preserve every novel through the partial final source page',
+    async () => {
+      const { requests, fetcher } = catalogueFetcher();
+      const { plugin } = createPlugin({
+        values: new Map([
+          ['translationProvider', 'off'],
+          ['browseBatchSize', String(batchSize)],
+        ]),
+        fetcher,
+      });
+      const paths = [];
+      for (let page = 1; page < 15; page++) {
+        const novels = await plugin.popularNovels(page);
+        assert(novels.length <= batchSize);
+        if (!novels.length) break;
+        paths.push(...novels.map(novel => novel.path));
+      }
+      assert.deepEqual(
+        paths,
+        Array.from(
+          { length: 45 },
+          (_, index) => '/novel/detail/' + (index + 1),
+        ),
+      );
+      assert.equal(new Set(paths).size, 45);
+      assert(
+        requests.length <= 4,
+        'Unused source-page halves must be buffered without a second fetch',
+      );
+    },
+  );
+}
+
+test('Browse buffers are isolated by filters and refresh the first page on reload', async () => {
+  const { requests, fetcher } = catalogueFetcher();
+  const { plugin } = createPlugin({
+    values: new Map([['translationProvider', 'off']]),
+    fetcher,
+  });
+  const options = {
+    filters: { status: { value: '1' }, length: { value: '2' } },
+  };
+  await plugin.popularNovels(1, options);
+  await plugin.popularNovels(2, options);
+  assert.equal(requests.length, 1);
+  assert(requests[0].includes('status=1&length=2'));
+  await plugin.popularNovels(2, { filters: { status: { value: '2' } } });
+  assert.equal(requests.length, 2);
+  assert(requests[1].includes('status=2'));
+  await plugin.popularNovels(1, options);
+  assert.equal(requests.length, 3);
+});
+
+test('unused Browse items survive a pause and a refresh invalidates later buffered pages', async () => {
+  const { requests, fetcher } = catalogueFetcher();
+  const { plugin } = createPlugin({
+    values: new Map([['translationProvider', 'off']]),
+    fetcher,
+  });
+  const first = await plugin.popularNovels(1);
+  const now = Date.now;
+  let second;
+  try {
+    Date.now = () => now() + 600000;
+    second = await plugin.popularNovels(2);
+  } finally {
+    Date.now = now;
+  }
+  assert.equal(requests.length, 1);
+  assert.equal(first[first.length - 1].path, '/novel/detail/10');
+  assert.equal(second[0].path, '/novel/detail/11');
+  await plugin.popularNovels(3);
+  assert.equal(requests.length, 2);
+  await plugin.popularNovels(1);
+  await plugin.popularNovels(3);
+  assert.equal(requests.length, 4);
+});
+
+test('only the returned Browse batch translates titles and decodes covers', async () => {
+  const imageRequests = [];
+  const translatedInputs = [];
+  const { plugin } = createPlugin({
+    fetcher: async url => {
+      if (url.startsWith('https://images.example')) {
+        imageRequests.push(url);
+        return new Response(png);
+      }
+      if (url.includes('translate.googleapis.com')) {
+        const inputs = new URL(url).searchParams.get('q').split('\n\n');
+        translatedInputs.push(...inputs);
+        return Response.json([
+          [[inputs.map((_, index) => 'Title ' + index).join('\n\n')]],
+        ]);
+      }
+      return Response.json({
+        code: 200,
+        data: {
+          total_page: 1,
+          wall_html: Array.from(
+            { length: 20 },
+            (_, index) =>
+              '<a href="/novel/detail/' +
+              (index + 1) +
+              '"><img alt="书名' +
+              (index + 1) +
+              '" data-src="https://images.example/' +
+              (index + 1) +
+              '.png"></a>',
+          ).join(''),
+        },
+      });
+    },
+  });
+  const novels = await plugin.popularNovels(1);
+  assert.equal(novels.length, 10);
+  assert.equal(imageRequests.length, 10);
+  assert.deepEqual(
+    translatedInputs,
+    Array.from({ length: 10 }, (_, index) => '书名' + (index + 1)),
+  );
+});
+
+test('unexpected source page size fails explicitly instead of dropping novels', async () => {
+  const { plugin } = createPlugin({
+    fetcher: async () =>
+      Response.json({ code: 200, data: { total_page: 2, wall_html: listing } }),
+  });
+  await assert.rejects(plugin.popularNovels(1), /page size changed/);
+});
+
+test('temporary Google server failure retries once and saves only the successful translation', async () => {
+  let attempts = 0;
+  const { plugin } = createPlugin({
+    fetcher: async url => {
+      if (url.startsWith('https://18mh.net/')) return source(chapter);
+      attempts++;
+      return attempts === 1
+        ? new Response('', { status: 503 })
+        : Response.json([[['Hello.\n\nGood weather.']]]);
+    },
+  });
+  assert((await plugin.parseChapter(chapterPath)).includes('Good weather.'));
+  assert.equal(attempts, 2);
+  await plugin.parseChapter(chapterPath);
+  assert.equal(attempts, 2);
+});
+
+test('repeated temporary errors stop after two attempts', async () => {
+  let attempts = 0;
+  const { plugin } = createPlugin({
+    fetcher: async url => {
+      if (url.startsWith('https://18mh.net/')) return source(chapter);
+      attempts++;
+      return new Response('', { status: 503 });
+    },
+  });
+  await assert.rejects(plugin.parseChapter(chapterPath), /HTTP 503/);
+  assert.equal(attempts, 2);
+});
+
+test('Google rate limits wait for cooldown before the one allowed retry', async () => {
+  const starts = [];
+  const { plugin } = createPlugin({
+    fetcher: async url => {
+      if (url.startsWith('https://18mh.net/')) return source(chapter);
+      starts.push(Date.now());
+      return starts.length === 1
+        ? new Response('', { status: 429, headers: { 'Retry-After': '2' } })
+        : Response.json([[['Hello.\n\nGood weather.']]]);
+    },
+  });
+  assert((await plugin.parseChapter(chapterPath)).includes('Hello.'));
+  assert.equal(starts.length, 2);
+  assert(starts[1] - starts[0] >= 4900);
+});
+
+test('authentication errors and long Retry-After cooldowns are not retried', async () => {
+  for (const status of [401, 403, 429]) {
+    let attempts = 0;
+    const { plugin } = createPlugin({
+      fetcher: async url => {
+        if (url.startsWith('https://18mh.net/')) return source(chapter);
+        attempts++;
+        return new Response('', {
+          status,
+          headers: status === 429 ? { 'Retry-After': '60' } : {},
+        });
+      },
+    });
+    await assert.rejects(
+      plugin.parseChapter(chapterPath),
+      new RegExp('HTTP ' + status),
+    );
+    assert.equal(attempts, 1);
+  }
+});
+
+test('network failures retry once but explicit aborts do not', async () => {
+  for (const aborted of [false, true]) {
+    let attempts = 0;
+    const { plugin } = createPlugin({
+      fetcher: async url => {
+        if (url.startsWith('https://18mh.net/')) return source(chapter);
+        attempts++;
+        if (attempts === 1) {
+          const error = new Error('Network failed');
+          if (aborted) error.name = 'AbortError';
+          throw error;
+        }
+        return Response.json([[['Hello.\n\nGood weather.']]]);
+      },
+    });
+    if (aborted)
+      await assert.rejects(
+        plugin.parseChapter(chapterPath),
+        /network request failed/,
+      );
+    else assert((await plugin.parseChapter(chapterPath)).includes('Hello.'));
+    assert.equal(attempts, aborted ? 1 : 2);
+  }
+});
+
+test('Microsoft reserves quota for each retry and uses the same provider', async () => {
+  let attempts = 0;
+  let characters = 0;
+  const { plugin, values } = createPlugin({
+    values: new Map([
+      ['translationProvider', 'microsoft'],
+      ['microsoftKey', 'test-key'],
+    ]),
+    fetcher: async (url, init) => {
+      if (url.startsWith('https://18mh.net/')) return source(chapter);
+      assert(url.includes('api.cognitive.microsofttranslator.com'));
+      const body = JSON.parse(init.body);
+      characters = body.reduce((sum, item) => sum + item.Text.length, 0);
+      attempts++;
+      return attempts === 1
+        ? new Response('', { status: 503 })
+        : Response.json(
+            body.map(() => ({ translations: [{ text: 'English text' }] })),
+          );
+    },
+  });
+  await plugin.parseChapter(chapterPath);
+  assert.equal(attempts, 2);
+  assert.equal(values.get('microsoftUsageV1').characters, characters * 2);
+});
+
+test('Microsoft retry is blocked if its extra reservation exceeds the local cap', async () => {
+  const values = new Map([
+    ['translationProvider', 'microsoft'],
+    ['microsoftKey', 'test-key'],
+  ]);
+  let attempts = 0;
+  const { plugin } = createPlugin({
+    values,
+    fetcher: async (url, init) => {
+      if (url.startsWith('https://18mh.net/')) return source(chapter);
+      attempts++;
+      const count = JSON.parse(init.body).reduce(
+        (sum, item) => sum + item.Text.length,
+        0,
+      );
+      values.set('microsoftMonthlyLimit', String(count));
+      return new Response('', { status: 503 });
+    },
+  });
+  await assert.rejects(
+    plugin.parseChapter(chapterPath),
+    /monthly character cap/,
+  );
+  assert.equal(attempts, 1);
+});
+
+test('cache clearing resets its switches and preserves credentials, quota, and unrelated data', async () => {
+  const values = new Map([
+    ['translationProvider', 'off'],
+    ['microsoftKey', 'private-key'],
+    ['microsoftRegion', 'centralindia'],
+    ['microsoftUsageV1', { month: '2026-11', characters: 123 }],
+    ['readingProgress', 42],
+    ['translationCacheV1:old', '<p>Old</p>'],
+    ['metadataCacheV1:old', 'Old title'],
+    ['translationCacheIndexV1', ['translationCacheV1:old', 'microsoftKey']],
+    ['metadataCacheIndexV1', ['metadataCacheV1:old']],
+    [
+      'coverCacheV1:old',
+      { uri: 'data:image/png;base64,abc', updatedAt: Date.now() },
+    ],
+    [
+      'coverCacheIndexV1',
+      [
+        { key: 'coverCacheV1:old', size: 30 },
+        { key: 'microsoftUsageV1', size: 1 },
+      ],
+    ],
+    ['clearTranslationCache', true],
+  ]);
+  const { plugin } = createPlugin({
+    values,
+    fetcher: async () => source('<main></main>'),
+  });
+  await plugin.searchNovels('test', 1);
+  assert(
+    !values.has('translationCacheV1:old') && !values.has('metadataCacheV1:old'),
+  );
+  assert(values.has('coverCacheV1:old'));
+  assert.equal(values.get('clearTranslationCache'), false);
+  values.set('clearCoverCache', true);
+  await plugin.searchNovels('test', 1);
+  assert(!values.has('coverCacheV1:old'));
+  assert.equal(values.get('clearCoverCache'), false);
+  assert.equal(values.get('microsoftKey'), 'private-key');
+  assert.equal(values.get('microsoftRegion'), 'centralindia');
+  assert.equal(values.get('microsoftUsageV1').characters, 123);
+  assert.equal(values.get('readingProgress'), 42);
+});
+
+test('cover caching can be bypassed without deleting existing cached covers', async () => {
+  const values = new Map([['cacheCovers', false]]);
+  let calls = 0;
+  const { plugin } = createPlugin({
+    values,
+    fetcher: async () => {
+      calls++;
+      return new Response(png);
+    },
+  });
+  await plugin.cover('https://images.example/test.png');
+  await plugin.cover('https://images.example/test.png');
+  assert.equal(calls, 2);
+  assert(!values.has('coverCacheIndexV1'));
+});
+
+test('clearing caches prevents an in-flight chapter or cover from repopulating them', async () => {
+  for (const cover of [false, true]) {
+    let finish;
+    let started;
+    const requested = new Promise(resolve => {
+      started = resolve;
+    });
+    const values = new Map();
+    const { plugin } = createPlugin({
+      values,
+      fetcher: async url => {
+        if (
+          url.includes('translate.googleapis.com') ||
+          url.includes('images.example')
+        ) {
+          started();
+          return new Promise(resolve => {
+            finish = resolve;
+          });
+        }
+        return source(
+          url.includes('/novel_chapter/') ? chapter : '<main></main>',
+        );
+      },
+    });
+    const pending = cover
+      ? plugin.cover('https://images.example/pending.png')
+      : plugin.parseChapter(chapterPath);
+    await requested;
+    values.set(cover ? 'clearCoverCache' : 'clearTranslationCache', true);
+    values.set('translationProvider', 'off');
+    await plugin.searchNovels('test', 1);
+    finish(
+      cover
+        ? new Response(png)
+        : Response.json([[['Hello.\n\nGood weather.']]]),
+    );
+    await pending;
+    assert(
+      !Array.from(values.keys()).some(key =>
+        key.startsWith(cover ? 'coverCacheV1:' : 'translationCacheV1:'),
+      ),
+    );
+  }
 });

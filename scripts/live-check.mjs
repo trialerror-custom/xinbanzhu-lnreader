@@ -30,6 +30,29 @@ await check('Pagination', async () => {
   assert.notEqual(second[0].path, novels?.[0]?.path);
   return { count: second.length, firstPath: second[0].path };
 });
+await check(
+  'Smaller batches preserve a full source page without duplicates',
+  async () => {
+    values.set('browseBatchSize', '20');
+    const full = await plugin.popularNovels(1);
+    values.set('browseBatchSize', '5');
+    const small = [];
+    for (let page = 1; page <= 4; page++)
+      small.push(...(await plugin.popularNovels(page)));
+    assert.equal(small.length, 20);
+    assert.equal(new Set(small.map(novel => novel.path)).size, 20);
+    assert.deepEqual(
+      small.map(novel => novel.path),
+      full.map(novel => novel.path),
+    );
+    values.set('browseBatchSize', '10');
+    return {
+      sourcePage: full.length,
+      batchSize: 5,
+      uniqueNovels: small.length,
+    };
+  },
+);
 await check('Status and length filters with pagination', async () => {
   const options = {
     filters: { status: { value: '1' }, length: { value: '1' } },

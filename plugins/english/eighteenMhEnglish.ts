@@ -28,7 +28,7 @@ type Setting = {
 class EighteenMhEnglishPlugin {
   id = 'eighteenMhEnglish';
   name = '18mh — English';
-  version = '1.2.0';
+  version = '1.3.0';
   site = 'https://18mh.net';
   icon = 'icon.png';
   imageRequestInit = { headers: { Referer: 'https://18mh.net/' } };
@@ -135,7 +135,7 @@ class EighteenMhEnglishPlugin {
       value: '1900000',
     },
     cacheTranslations: {
-      label: 'Cache translated chapters',
+      label: 'Cache translated text (chapters, titles, descriptions)',
       type: 'Switch',
       value: true,
     },
@@ -159,10 +159,49 @@ class EighteenMhEnglishPlugin {
       type: 'Switch',
       value: true,
     },
+    browseBatchSize: {
+      label: 'Novels per Browse batch (refresh Browse after changing)',
+      type: 'Select',
+      value: '10',
+      options: [
+        { label: '5 — lighter', value: '5' },
+        { label: '10 — balanced', value: '10' },
+        { label: '20 — full source page', value: '20' },
+      ],
+    },
+    cacheCovers: { label: 'Cache decoded covers', type: 'Switch', value: true },
+    clearTranslationCache: {
+      label: 'Clear text cache on next source request',
+      type: 'Switch',
+      value: false,
+    },
+    clearCoverCache: {
+      label: 'Clear cover cache on next source request',
+      type: 'Switch',
+      value: false,
+    },
+    retryTemporaryErrors: {
+      label: 'Retry temporary translation failures once',
+      type: 'Switch',
+      value: true,
+    },
+    googleRequestSpacing: {
+      label: 'Google request spacing',
+      type: 'Select',
+      value: '1250',
+      options: [
+        { label: '1.25 seconds', value: '1250' },
+        { label: '2 seconds', value: '2000' },
+        { label: '3 seconds', value: '3000' },
+      ],
+    },
   };
   private queue: Promise<unknown> = Promise.resolve();
   private inFlight: Record<string, Promise<string> | undefined> = {};
   private googleReadyAt = 0;
+  private textCacheGeneration = 0;
+  private coverCacheGeneration = 0;
+  private browseSnapshots: Record<string, { novels: NovelItem[] }> = {};
   private coverRequests: Record<
     string,
     Promise<string | undefined> | undefined
@@ -173,6 +212,41 @@ class EighteenMhEnglishPlugin {
     return typeof value === 'string' || typeof value === 'boolean'
       ? value
       : this.pluginSettings[key].value;
+  }
+
+  private maintainCaches(): void {
+    if (this.setting('clearTranslationCache') === true) {
+      this.textCacheGeneration++;
+      for (const [index, prefix] of [
+        ['translationCacheIndexV1', 'translationCacheV1:'],
+        ['metadataCacheIndexV1', 'metadataCacheV1:'],
+      ]) {
+        const keys = storage.get(index);
+        if (Array.isArray(keys))
+          keys.forEach(key => {
+            if (typeof key === 'string' && key.startsWith(prefix))
+              storage.delete(key);
+          });
+        storage.delete(index);
+      }
+      storage.set('clearTranslationCache', false);
+    }
+    if (this.setting('clearCoverCache') === true) {
+      this.coverCacheGeneration++;
+      const entries = storage.get('coverCacheIndexV1');
+      if (Array.isArray(entries))
+        entries.forEach(entry => {
+          if (
+            entry &&
+            typeof entry.key === 'string' &&
+            entry.key.startsWith('coverCacheV1:')
+          )
+            storage.delete(entry.key);
+        });
+      storage.delete('coverCacheIndexV1');
+      storage.set('clearCoverCache', false);
+      this.coverRequests = {};
+    }
   }
 
   resolveUrl(path: string): string {
@@ -298,6 +372,7 @@ class EighteenMhEnglishPlugin {
       | { uri?: string; updatedAt?: number }
       | undefined;
     if (
+      this.setting('cacheCovers') === true &&
       cached?.uri?.startsWith('data:image/') &&
       Date.now() - (cached.updatedAt || 0) < 7 * 86400000
     )
@@ -308,7 +383,7 @@ class EighteenMhEnglishPlugin {
     try {
       return await request;
     } finally {
-      delete this.coverRequests[key];
+      if (this.coverRequests[key] === request) delete this.coverRequests[key];
     }
   }
 
@@ -316,6 +391,7 @@ class EighteenMhEnglishPlugin {
     url: string,
     key: string,
   ): Promise<string | undefined> {
+    const generation = this.coverCacheGeneration;
     try {
       const response = await fetchApi(url, {
         headers: { Referer: this.site + '/' },
@@ -334,6 +410,11 @@ class EighteenMhEnglishPlugin {
       const mime = this.imageMime(bytes);
       if (!mime) return undefined;
       const uri = 'data:' + mime + ';base64,' + this.base64(bytes);
+      if (
+        this.setting('cacheCovers') !== true ||
+        generation !== this.coverCacheGeneration
+      )
+        return uri;
       storage.set(key, { uri, updatedAt: Date.now() });
       const stored = storage.get('coverCacheIndexV1');
       const entries: { key: string; size: number }[] = Array.isArray(stored)
@@ -415,6 +496,7 @@ class EighteenMhEnglishPlugin {
     pageNo: number,
     options?: BrowseOptions,
   ): Promise<NovelItem[]> {
+    this.maintainCaches();
     if (!Number.isInteger(pageNo) || pageNo < 1)
       throw new Error('Invalid page number.');
     const collection = this.filterValue('collection', options);
@@ -429,15 +511,33 @@ class EighteenMhEnglishPlugin {
         'For tag browsing, set Category / collection to All — latest updates. The source uses separate collection and tag pages.',
       );
     const base = tag ? '/novel/tag/' + encodeURIComponent(tag) : collection;
+    const batchSize = Number(this.setting('browseBatchSize'));
+    if (![5, 10, 20].includes(batchSize))
+      throw new Error('Choose 5, 10, or 20 novels per Browse batch.');
+    const sourcePage = Math.floor(((pageNo - 1) * batchSize) / 20) + 1;
+    const offset = ((pageNo - 1) * batchSize) % 20;
     // Match the site's feed pagination, which differs from full-page pagination.
     const path =
       base +
-      (pageNo > 1 ? (base === '/novel/all' ? '/page/' : '/') + pageNo : '');
+      (sourcePage > 1
+        ? (base === '/novel/all' ? '/page/' : '/') + sourcePage
+        : '');
     const query = ['_feed=1'];
     for (const key of ['status', 'length']) {
       const value = this.filterValue(key, options);
       if (value) query.push(key + '=' + encodeURIComponent(value));
     }
+    const selectionKey = base + '?' + query.join('&') + ':page:';
+    if (pageNo === 1)
+      Object.keys(this.browseSnapshots).forEach(key => {
+        if (key.startsWith(selectionKey)) delete this.browseSnapshots[key];
+      });
+    const snapshotKey = selectionKey + sourcePage;
+    const cached = this.browseSnapshots[snapshotKey];
+    if (pageNo !== 1 && cached)
+      return this.translatedListings(
+        cached.novels.slice(offset, offset + batchSize),
+      );
     const response = await fetchApi(
       this.resolveUrl(path + '?' + query.join('&')),
       {
@@ -458,13 +558,28 @@ class EighteenMhEnglishPlugin {
       );
     if (
       typeof body.data.total_page === 'number' &&
-      pageNo > body.data.total_page
+      sourcePage > body.data.total_page
     )
       return [];
-    return this.translatedListings(this.listings(load(body.data.wall_html)));
+    const novels = this.listings(load(body.data.wall_html));
+    if (
+      novels.length > 20 ||
+      (novels.length > 0 &&
+        novels.length < 20 &&
+        typeof body.data.total_page === 'number' &&
+        sourcePage < body.data.total_page)
+    )
+      throw new Error(
+        'The source page size changed. Refresh or update the plugin to avoid skipping novels.',
+      );
+    this.browseSnapshots[snapshotKey] = { novels };
+    const keys = Object.keys(this.browseSnapshots);
+    while (keys.length > 8) delete this.browseSnapshots[keys.shift()!];
+    return this.translatedListings(novels.slice(offset, offset + batchSize));
   }
 
   async searchNovels(searchTerm: string, pageNo: number): Promise<NovelItem[]> {
+    this.maintainCaches();
     const query = searchTerm.trim();
     if (/^(?:https:\/\/18mh\.net)?\/novel\/detail\/\d+\/?$/.test(query)) {
       if (pageNo !== 1) return [];
@@ -488,6 +603,7 @@ class EighteenMhEnglishPlugin {
   }
 
   async parseNovel(novelPath: string) {
+    this.maintainCaches();
     const path = this.path(novelPath).replace(/\/$/, '');
     if (!/^\/novel\/detail\/\d+$/.test(path))
       throw new Error('Invalid novel path.');
@@ -560,6 +676,7 @@ class EighteenMhEnglishPlugin {
   }
 
   private async metadata(texts: string[], toggle: string): Promise<string[]> {
+    const generation = this.textCacheGeneration;
     const provider = String(this.setting('translationProvider')) as Provider;
     if (this.setting(toggle) !== true || provider === 'off') return texts;
     if (provider !== 'google' && provider !== 'microsoft')
@@ -590,12 +707,13 @@ class EighteenMhEnglishPlugin {
           batch.forEach((text, index) => {
             const translated = translations[index];
             resolved[text] = translated;
-            if (!cacheEnabled) return;
+            if (!cacheEnabled || generation !== this.textCacheGeneration)
+              return;
             const key = prefix + text;
             storage.set(key, translated);
             if (keys.indexOf(key) < 0) keys.push(key);
           });
-          if (cacheEnabled) {
+          if (cacheEnabled && generation === this.textCacheGeneration) {
             while (keys.length > 5000) storage.delete(keys.shift()!);
             storage.set('metadataCacheIndexV1', keys);
           }
@@ -610,6 +728,7 @@ class EighteenMhEnglishPlugin {
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
+    this.maintainCaches();
     const path = this.path(chapterPath);
     if (!/^\/novel_chapter\/\d+\/\d+\.html$/.test(path))
       throw new Error('Invalid chapter path.');
@@ -632,6 +751,7 @@ class EighteenMhEnglishPlugin {
     provider: Provider,
     key: string,
   ): Promise<string> {
+    const generation = this.textCacheGeneration;
     const cacheEnabled = this.setting('cacheTranslations') === true;
     const cacheKey = 'translationCacheV1:' + key;
     if (provider !== 'off' && cacheEnabled) {
@@ -676,7 +796,12 @@ class EighteenMhEnglishPlugin {
     const html = translated
       .map(text => '<p>' + this.escapeHtml(text) + '</p>')
       .join('\n');
-    if (provider !== 'off' && cacheEnabled) this.cache(cacheKey, html);
+    if (
+      provider !== 'off' &&
+      cacheEnabled &&
+      generation === this.textCacheGeneration
+    )
+      this.cache(cacheKey, html);
     return html;
   }
 
@@ -768,8 +893,7 @@ class EighteenMhEnglishPlugin {
           characters += parts[start].length;
           batch.push(parts[start++]);
         }
-        this.reserveMicrosoftQuota(characters);
-        const response = await fetchApi(
+        const response = await this.translationResponse(
           'https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&from=zh-Hans&to=en',
           {
             method: 'POST',
@@ -780,6 +904,7 @@ class EighteenMhEnglishPlugin {
             },
             body: JSON.stringify(batch.map(Text => ({ Text }))),
           },
+          async () => this.reserveMicrosoftQuota(characters),
         );
         if (!response.ok)
           throw new Error(
@@ -808,12 +933,18 @@ class EighteenMhEnglishPlugin {
 
   private async googleSingle(text: string): Promise<string> {
     // Share pacing across titles, chapter bodies, and delimiter-recovery requests.
-    const delay = this.googleReadyAt - Date.now();
-    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
-    this.googleReadyAt = Date.now() + 1250;
-    const response = await fetchApi(
+    const spacing = Number(this.setting('googleRequestSpacing'));
+    if (![1250, 2000, 3000].includes(spacing))
+      throw new Error('Choose a valid Google request spacing.');
+    const response = await this.translationResponse(
       'https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q=' +
         encodeURIComponent(text),
+      undefined,
+      async () => {
+        const delay = this.googleReadyAt - Date.now();
+        if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+        this.googleReadyAt = Date.now() + spacing;
+      },
     );
     if (!response.ok) {
       if (response.status === 429) this.googleReadyAt = Date.now() + 5000;
@@ -834,6 +965,52 @@ class EighteenMhEnglishPlugin {
     if (!output.trim())
       throw new Error('Google Translate returned empty text.');
     return output;
+  }
+
+  private async translationResponse(
+    url: string,
+    init?: RequestInit,
+    beforeAttempt?: () => Promise<void>,
+  ): Promise<Response> {
+    const retries = this.setting('retryTemporaryErrors') === true ? 1 : 0;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      if (beforeAttempt) await beforeAttempt();
+      let response: Response;
+      try {
+        response = await fetchApi(url, init);
+      } catch (error) {
+        if (
+          attempt === retries ||
+          (error instanceof Error && error.name === 'AbortError')
+        )
+          throw new Error(
+            'Translation network request failed. Try again later.',
+          );
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+      if (
+        attempt === retries ||
+        ![429, 500, 502, 503, 504].includes(response.status)
+      )
+        return response;
+      const header = response.headers.get('Retry-After');
+      const retryAfter =
+        header === null
+          ? 0
+          : /^\d+(?:\.\d+)?$/.test(header.trim())
+            ? Number(header) * 1000
+            : Math.max(0, Date.parse(header) - Date.now());
+      // Do not retry early when the service requests a long cooldown.
+      if (!Number.isFinite(retryAfter) || retryAfter > 10000) return response;
+      await new Promise(resolve =>
+        setTimeout(
+          resolve,
+          Math.max(response.status === 429 ? 5000 : 1000, retryAfter),
+        ),
+      );
+    }
+    throw new Error('Translation request failed.');
   }
 
   private reserveMicrosoftQuota(characters: number): void {

@@ -2,7 +2,7 @@
 
 A small custom repository for **LNReader 2.1.4**. The source retrieves public
 18mh.net novel chapters and optionally translates Chinese to English before
-passing them to the reader. Version **1.2.0** translates novel titles,
+passing them to the reader. Version **1.3.0** translates novel titles,
 chapter names and descriptions, decodes cover thumbnails, and supports the site's browse filters. No app modification or
 translation backend is needed.
 
@@ -10,20 +10,67 @@ translation backend is needed.
 
 In LNReader, open the installed plugin's settings:
 
-**New in 1.2.0:** **Translate novel descriptions** and **Load and decode cover
-thumbnails** both default to on. Descriptions use the selected translator and
-translation cache; provider Off leaves them in Chinese. Covers work independently
-of translation and do not use a translation API or third-party proxy.
+**New in 1.3.0:** smaller Browse batches, separate cover/text cache controls,
+cache-clearing switches, bounded translation retries, and configurable Google
+spacing. Existing translation choices, IDs, and source paths are preserved.
 
-| Setting                         | Value                                                       |
-| ------------------------------- | ----------------------------------------------------------- |
-| Translation provider            | Google Translate (unofficial), Microsoft Translator, or Off |
-| Microsoft API key               | Your own Translator resource key; leave blank for Google    |
-| Microsoft resource region       | The region shown in the Azure resource                      |
-| Microsoft monthly character cap | Defaults to 1,900,000 on this device                        |
-| Cache translated chapters       | Enabled by default; retains the latest 100 chapter results  |
-| Translate novel titles          | Enabled by default for Browse, search, and novel details    |
-| Translate chapter names         | Enabled by default when loading a novel's chapter list      |
+| Setting                                   | Value                                                                               |
+| ----------------------------------------- | ----------------------------------------------------------------------------------- |
+| Translation provider                      | Google Translate (unofficial), Microsoft Translator, or Off                         |
+| Microsoft API key                         | Your own Translator resource key; leave blank for Google                            |
+| Microsoft resource region                 | The region shown in the Azure resource                                              |
+| Microsoft monthly character cap           | Defaults to 1,900,000 on this device                                                |
+| Cache translated text                     | Enabled by default; retains the latest 100 chapters and up to 5,000 metadata values |
+| Translate novel titles                    | Enabled by default for Browse, search, and novel details                            |
+| Translate chapter names                   | Enabled by default when loading a novel's chapter list                              |
+| Novels per Browse batch                   | 5, 10, or 20; defaults to 10                                                        |
+| Cache decoded covers                      | Enabled independently of text caching                                               |
+| Clear text / cover cache                  | One-shot switches; run on the next source request                                   |
+| Retry temporary translation failures once | Enabled by default                                                                  |
+| Google request spacing                    | 1.25, 2, or 3 seconds; defaults to 1.25                                             |
+
+Descriptions and thumbnails still default to on. Provider Off leaves descriptions
+in Chinese; covers work independently and do not use a translation API or proxy.
+
+## Faster browsing and cache maintenance
+
+Browse uses the source's 20-item pages but returns only the chosen 5/10/20-item
+batch. Remaining raw items stay in a memory buffer; their titles and
+covers are processed only when LNReader requests that batch. Numbering maps across
+source pages without discarding items, including the last partial page. Filters
+have separate buffers. Refreshing the first Browse page discards that selection's
+buffered pages and refetches the source. The buffer holds up to eight source pages
+while the plugin remains loaded; unused items do not expire on a timer. Search retains
+the source's normal page size. Refresh Browse after changing the batch size.
+
+This is request-based batching, not viewport tracking. LNReader may request more
+items early to fill the screen. It has been checked against 2.1.4's Browse hook,
+which continues until an empty response rather than requiring 20 results.
+
+For large chapter lists, optionally turn off **Translate chapter names** to avoid
+translating every name when opening novel details. This release does not change
+that existing preference. Full-chapter translation and downloads behave as before.
+
+**Cache translated text** and **Cache decoded covers** can be disabled separately.
+Disabling a cache bypasses it without deleting stored entries. To remove stored
+results, enable the relevant **Clear ... cache on next source request** switch,
+then refresh Browse, search, a novel, or a chapter. The switch resets after the
+operation; reopen plugin settings to see the reset. Clearing the text cache removes
+both providers' chapter/title/description results. Clearing covers removes decoded
+image entries. Requests already running may still finish, but do not refill the
+cleared cache. API keys, region, provider choice, Microsoft usage counter, reading
+progress, and LNReader's downloaded files are preserved. Clearing these caches
+does not change names/descriptions already saved in the library; refresh a novel
+to fetch its metadata again.
+
+Transient network failures and HTTP 429/500/502/503/504 responses get at most one
+retry, with a delay. Authentication errors, invalid requests, malformed response
+data, explicit aborts, and local quota errors are not retried. Retry-After is
+respected; if it asks for more than ten seconds, the automatic retry is skipped.
+Google requests share the selected spacing across metadata and chapter bodies.
+Each Microsoft attempt reserves its character count, including retries, so the
+local cap remains conservative. Retries never switch providers. The F0 resource
+is still required for Microsoft's free tier.
 
 Google is selected by default and needs no account or API key. This uses an
 unofficial endpoint that can throttle, block, or change. Microsoft requires an
@@ -63,10 +110,10 @@ with remote `https://github.com/trialerror-custom/xinbanzhu-lnreader.git`. The
 existing published repository URL stays the same. The existing workflow builds,
 tests, and deploys releases pushed to `main`.
 
-## Upgrade to 1.2.0
+## Upgrade to 1.3.0
 
 Publish the updated source through the existing workflow, refresh the repository
-in LNReader, and update **18mh — English** to **1.2.0**. Its ID and setting keys
+in LNReader, and update **18mh — English** to **1.3.0**. Its ID and setting keys
 are unchanged, preserving the existing source association and saved settings.
 The title, description, and cover switches default to on for existing installations.
 
