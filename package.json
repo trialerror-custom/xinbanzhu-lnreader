@@ -1,0 +1,24 @@
+{
+  "name": "ln-reader-custom",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal LNReader 2.1.4 source with selectable chapter translation",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit && prettier --check .",
+    "format": "prettier --write .",
+    "test": "node --test tests/*.test.mjs",
+    "check:plugin": "node scripts/live-check.mjs",
+    "serve": "node scripts/serve.mjs"
+  },
+  "devDependencies": {
+    "cheerio": "1.0.0-rc.12",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
